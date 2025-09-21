@@ -475,7 +475,7 @@ class BPETokenizerParam:
     special_tokens: list[str] | None = None
 
 
-class SlowBPETokenizer:
+class BPETokenizer:
     def __init__(self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None):
         self.vocab = vocab
         self.merges = merges
@@ -483,13 +483,22 @@ class SlowBPETokenizer:
             self.special_tokens = set(special_tokens)
         else:
             self.special_tokens = set()
+        # stoi占用内存：2.6MB
         self.stoi = self.reverse_vocab(vocab)
+        self.merges_rank = self.compute_merges_rank()
 
-    def reverse_vocab(self,vocab):
+    def reverse_vocab(self, vocab):
         stoi = defaultdict(int)
         for key, value in vocab.items():
             stoi[value] = key
         return stoi
+
+    def compute_merges_rank(self):
+        # 预先计算merges的rank，方便后续查询
+        merges_rank = defaultdict(lambda:  defaultdict(int))
+        for idx, pair in enumerate(self.merges):
+            merges_rank[pair[0]][pair[1]] = idx+1
+        return merges_rank
 
     def from_files(cls, vocab_filepath: str, merges_filepath: str, special_tokens: list[str] | None = None):
         """_summary_
@@ -520,42 +529,56 @@ class SlowBPETokenizer:
                     'utf-8'), pairs[1].encode('utf-8')
                 cls.merges.append((token1, token2))
 
+        cls.merges_rank = cls.compute_merges_rank()
         cls.special_tokens = set(special_tokens)
         return cls
-    
-    def split_by_special_tokens(self,text)->list[str]:
-        # 1. 按照special token对文本进行分块，这里有个问题，如果special tokens为空，那么正则表达式切分的效果是按照每个英文字母进行切分
-        if len(self.special_tokens)!=0:
-            # TODO 这里由于|会优先匹配前面的，因此如果<s>在<s><s>前面就会把<s><s>拆成两个，因此这里先排序
-            blocks = re.split(
-            '(' + '|'.join(map(re.escape, sorted(list(self.special_tokens),key=len,reverse=True))) + ')', text)
-        else:
-            blocks = [text]
-        # 2. 针对每个block进行预分词
-        # 按顺序存放每个单词以及special token
-        blocks_list = []
-        for block in blocks:
-            if not block:
-                continue
-            if block in self.special_tokens:
-                blocks_list.append(block)
-            else:
-                blocks_list.extend(self.pretokenize(block))
-        return blocks_list
 
-    def pretokenize(self, text) -> list[str]:
-        result = []
-        for word in re.finditer(
-                r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""", text):
-            # 需要加上去掉\r，否则会出现问题
-            result.append(word.group(0).replace('\r', ''))
-        return result
+    def split_by_special_tokens(self, text: str) -> Iterator[str]:
+        if not self.special_tokens:
+            # 如果没有特殊 token，直接对整个文本进行预分词
+            yield from self.pretokenize(text)
+            return
 
-    def encode(self,text:str)->list[int]:
+        # 1. 构造正则表达式，用于匹配特殊 token
+        sorted_tokens = sorted(list(self.special_tokens),
+                               key=len, reverse=True)
+        # 注意这里用的是非捕获分组 (?:...)
+        pattern = re.compile(
+            '(?:' + '|'.join(map(re.escape, sorted_tokens)) + ')')
+
+        # 2. 使用 re.finditer 迭代查找特殊 token
+        last_end = 0
+        for match in pattern.finditer(text):
+            # 获取特殊 token 的起始和结束位置
+            start, end = match.span()
+            # 获取特殊 token 之前的文本块
+            if start > last_end:
+                yield from self.pretokenize(text[last_end:start])
+
+            # 返回特殊 token 本身
+            yield match.group(0)
+            last_end = end
+
+        # 3. 处理最后一个特殊 token 之后的剩余文本
+        if last_end < len(text):
+            yield from self.pretokenize(text[last_end:])
+
+    def pretokenize(self, text: str) -> Iterator[str]:
+        for word_match in re.finditer(
+            r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""", text
+        ):
+            yield word_match.group(0).replace('\r', '')
+
+    def encode(self, text: str) -> list[int]:
         # return self.slow_encode(text)
-        return self.greedy_match_encode(text)
+        # return self.greedy_match_encode(text)
+        return self.faster_encode(text)
 
-    def greedy_match_encode(self,text:str)->list[int]:
+    def greedy_match_encode(self, text: str) -> list[int]:
+        # 这种实现无法通过测试，经过研究原因在于如果对于unicode字符' 🙃'，其转换成字节数组为b' \xf0\x9f\x99\x83'
+        # 其中 \xf0不在字典中，但是 \xf0\x9f在字典中，但是到\xf0已经匹配不到了
+        # 其实除了上面的问题，贪婪方法进行encode还是不能通过，因为顺序和tiktoken有所不同，例如' Leland'，贪婪匹配应该分成' Le'和'land'，但是
+        # 实际上是分成了' L'和'eland'
         blocks_list = self.split_by_special_tokens(text)
         result = []
         for block in blocks_list:
@@ -566,19 +589,27 @@ class SlowBPETokenizer:
                 continue
             # 对单词进行贪婪匹配，尽可能匹配最长的
             block_bytes = block.encode("utf-8")
+            # 这里匹配的逻辑需要修改，例如abc是一个词，但是合并的顺序是bc abc，这样从前向后找ab不在词表中但是abc是在词表中的
+            # 改成从后向前去匹配尽可能长的子串
             start = 0
-            end = 1
-            while end <= len(block_bytes):
-                sub_str = block_bytes[start:end]
-                if sub_str in self.stoi.keys():
-                    # 这种情况没法再向后贪婪匹配了
-                    if end == len(block_bytes):
+            end = len(block_bytes)
+            while start < len(block_bytes):
+                # 外层循环遍历起点
+                while end > start:
+                    # 内层循环遍历终点
+                    sub_str = block_bytes[start:end]
+                    if sub_str in self.stoi.keys():
                         result.append(self.stoi[sub_str])
-                    end+=1
-                else:
-                    pre_str = block_bytes[start:end-1]
-                    result.append(self.stoi[pre_str])
-                    start = end-1
+                        if end == len(block_bytes):
+                            # end如果是词的末尾，这个词就处理结束了
+                            start = len(block_bytes)
+                            break
+                        else:
+                            start = end
+                            end = len(block_bytes)
+                            break
+                    else:
+                        end -= 1
         return result
 
     def slow_encode(self, text: str) -> list[int]:
@@ -632,11 +663,110 @@ class SlowBPETokenizer:
                     head = head.nextNode
         return encoded_result
 
+    def faster_encode(self, text: str) -> list[int]:
+
+        # 内部类，存放进列表中
+        @dataclass
+        class ListNode:
+            # 约定value如果为None说明该节点已经被删除了（惰性删除）
+            value: bytes = None
+            # -1表示是链表的最后一个节点
+            nextIdx: int = -1
+            # -1表示是链表的第一个节点
+            preIdx: int = -1
+
+            def __str__(self) -> str:
+                return str({
+                    "value": self.value,
+                    "nextIdx": self.nextIdx,
+                    "preIdx": self.preIdx
+                })
+
+        @dataclass
+        class HeapItem:
+            rank: int = 0
+            pair: tuple[bytes, bytes] = None
+            # idx表示pair首个字节的下标
+            idx: int = -1
+
+            def __lt__(self, other):
+                # rank小的先合并
+                if self.rank != other.rank:
+                    return self.rank < other.rank
+                # rank相同index小的先合并
+                return self.idx < other.idx
+
+            def __eq__(self, other):
+                return self.rank == other.rank and self.pair == other.pair and self.idx == other.idx
+
+        # 1. 首先获取按特殊token进行分块以及预分词之后的结果,已经修改为迭代器方式，避免存储全部结果
+        blocks_list = self.split_by_special_tokens(text)
+        result = []
+        for block in blocks_list:
+            # 2. 处理每个词，对于非特殊token这次不采用建立链表的方式，而是采用数组中存放链表的方式
+            if block in self.special_tokens:
+                result.append(self.stoi[block.encode("utf-8")])
+                continue
+            # 3. 需要遍历这个词，一方面建立成链表（以数组方式存储），另一方面建立优先级队列
+            word_list: list[ListNode] = []
+            priority_queue: list[HeapItem] = []
+            for idx, byte in enumerate(block.encode("utf-8")):
+                node = ListNode(bytes([byte]), -1, -1)
+                if idx > 0:
+                    node.preIdx = idx-1
+                    word_list[idx-1].nextIdx = idx
+                    pair = (word_list[idx-1].value, node.value)
+                    rank = self.merges_rank[pair[0]][pair[1]]
+                    item = HeapItem(rank, pair, idx-1)
+                    priority_queue.append(item)
+                word_list.append(node)
+            heapq.heapify(priority_queue)
+            # 4. 开始迭代merge，同样，堆中的元素使用惰性更新，pop出来的元素需要检查是否有效
+            while len(priority_queue) != 0:
+                item: HeapItem = heapq.heappop(priority_queue)
+                # 4.1 检查item是否有效,首先rank=0说明没有这个merge对
+                if item.rank == 0:
+                    continue
+                pair = item.pair
+                first_node = word_list[item.idx]
+                second_node = word_list[first_node.nextIdx] if first_node.nextIdx != -1 else None
+                # 4.2 检查item对应位置的pair是否还是一样，如果不一样说明发生了合并，item已经过期
+                if pair != (first_node.value, second_node.value if second_node is not None else None):
+                    continue
+                # 4.3 item有效继续更新
+                # 4.3.1 首先修改链表，合并value，修改前后链接
+                first_node.value += second_node.value
+                second_node.value = None
+                first_node.nextIdx = second_node.nextIdx
+                if second_node.nextIdx != -1:
+                    word_list[second_node.nextIdx].preIdx = item.idx
+                # 4.3.2 把新出现的pair添加到优先级队列中
+                if first_node.preIdx != -1:
+                    pre_pair_idx = first_node.preIdx
+                    pre_pair = (
+                        word_list[pre_pair_idx].value, first_node.value)
+                    rank = self.merges_rank[pre_pair[0]][pre_pair[1]]
+                    new_item = HeapItem(rank, pre_pair, pre_pair_idx)
+                    heapq.heappush(priority_queue, new_item)
+                if first_node.nextIdx != -1:
+                    next_pair = (first_node.value,
+                                 word_list[first_node.nextIdx].value)
+                    rank = self.merges_rank[next_pair[0]][next_pair[1]]
+                    new_item = HeapItem(rank, next_pair, item.idx)
+                    heapq.heappush(priority_queue, new_item)
+            # 5. 从第一个节点找到最后一个节点，把每个token对应的token id加入到最终结果中
+            cur_idx = 0
+            while cur_idx != -1:
+                node = word_list[cur_idx]
+                result.append(self.stoi[node.value])
+                cur_idx = node.nextIdx
+        return result
+
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
         # encode_iterable思路比较简单，就是一个个单词去编码
         # iterable里面传入的字符串实际上是一段文本
         for text in iterable:
-            result = self.encode(text) 
+            result = self.encode(text)
             for token_id in result:
                 yield token_id
 
@@ -659,16 +789,15 @@ class SlowBPETokenizer:
         return text
 
 
-
 if __name__ == "__main__":
     file_path = "/home/cong/Projs/assignment1-basics/cs336_basics/address.txt"
-    with open(file_path,"r",encoding="utf-8") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
     blank_str = ""
     # unicode_chr = "😊"
-    unicode_chr  = "🙃"
+    unicode_chr = "🙃"
     ascii_str = "Hello,how are you?"
-    from tests.test_tokenizer import VOCAB_PATH,MERGES_PATH,get_tokenizer_from_vocab_merges_path,test_address_matches_tiktoken
+    from tests.test_tokenizer import VOCAB_PATH, MERGES_PATH, get_tokenizer_from_vocab_merges_path, test_address_matches_tiktoken, test_unicode_string_matches_tiktoken, test_german_matches_tiktoken
     # tokenizer = get_tokenizer_from_vocab_merges_path(
     #     vocab_path=VOCAB_PATH,
     #     merges_path=MERGES_PATH,
@@ -678,4 +807,5 @@ if __name__ == "__main__":
     # token_ids = tokenizer.encode(test_string)
     # decoded = tokenizer.decode(token_ids)
     # test_overlapping_special_tokens()
-    
+    # test_unicode_string_matches_tiktoken()
+    test_german_matches_tiktoken()
