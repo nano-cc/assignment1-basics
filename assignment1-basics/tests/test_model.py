@@ -41,7 +41,8 @@ def test_embedding(numpy_snapshot, ts_state_dict, in_indices, vocab_size, d_mode
 
 
 def test_swiglu(numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff):
-    w1_weight, w2_weight, w3_weight = [ts_state_dict[0][f"layers.0.ffn.{k}.weight"] for k in ["w1", "w2", "w3"]]
+    w1_weight, w2_weight, w3_weight = [
+        ts_state_dict[0][f"layers.0.ffn.{k}.weight"] for k in ["w1", "w2", "w3"]]
 
     actual_output = run_swiglu(
         d_model=d_model,
@@ -64,8 +65,10 @@ def test_scaled_dot_product_attention(numpy_snapshot, q, k, v, mask):
 
 def test_4d_scaled_dot_product_attention(numpy_snapshot, q, k, v, mask):
     # Shape: (batch_size, num_heads, seq_len, d_k)
-    q, k, v = (rearrange(x, "(batch head) seq d -> batch head seq d", head=2) for x in (q, k, v))
-    mask = rearrange(mask, "(batch head) query key -> batch head query key", head=2)
+    q, k, v = (rearrange(x, "(batch head) seq d -> batch head seq d", head=2)
+               for x in (q, k, v))
+    mask = rearrange(
+        mask, "(batch head) query key -> batch head query key", head=2)
 
     actual_output = run_scaled_dot_product_attention(Q=q, K=k, V=v, mask=mask)
     numpy_snapshot.assert_match(
@@ -156,7 +159,8 @@ def test_transformer_lm_truncated_input(
 
 
 def test_transformer_block(numpy_snapshot, ts_state_dict, in_embeddings, d_model, n_heads, d_ff, n_keys, theta):
-    block_weights = {k.replace("layers.0.", ""): v for k, v in ts_state_dict[0].items() if "layers.0." in k}
+    block_weights = {k.replace("layers.0.", ""): v for k,
+                     v in ts_state_dict[0].items() if "layers.0." in k}
 
     actual_output = run_transformer_block(
         d_model=d_model,
@@ -178,7 +182,8 @@ def test_rmsnorm(numpy_snapshot, ts_state_dict, in_embeddings):
     reference_weights = state_dict["layers.1.ln1.weight"]
     d_model = reference_weights.shape[0]
 
-    actual_output = run_rmsnorm(d_model=d_model, eps=1e-5, weights=reference_weights, in_features=in_embeddings)
+    actual_output = run_rmsnorm(
+        d_model=d_model, eps=1e-5, weights=reference_weights, in_features=in_embeddings)
 
     numpy_snapshot.assert_match(actual_output, atol=1e-6)
 
@@ -199,4 +204,5 @@ def test_silu_matches_pytorch():
     )
     expected_output = F.silu(x)
     actual_output = run_silu(x)
-    numpy.testing.assert_allclose(actual_output.detach().numpy(), expected_output.detach().numpy(), atol=1e-6)
+    numpy.testing.assert_allclose(actual_output.detach(
+    ).numpy(), expected_output.detach().numpy(), atol=1e-6)
