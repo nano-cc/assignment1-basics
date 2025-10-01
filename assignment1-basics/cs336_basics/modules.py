@@ -134,6 +134,7 @@ class RotaryPositionalEmbedding(nn.Module):
         half_dim = d_k // 2
         col = torch.arange(0, half_dim, device=device).float().view(1, -1)
         row = torch.arange(0, max_seq_len, device=device).float().view(-1, 1)
+        # 这里d_k不能像seq_len一样先定义一个大的然后截断处理更小的
         theta_mat = 1.0 / theta ** ((2*col)/d_k)
         pos_cis = row @ theta_mat
         assert pos_cis.shape == (max_seq_len, half_dim)
@@ -192,16 +193,16 @@ def scaled_dot_product_attention(Q: Float[torch.Tensor, "batch_size ... seq_len 
 
 
 class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, d_model: int, num_heads: int, rope: RotaryPositionalEmbedding = None, **kwargs):
+    def __init__(self, d_model: int, num_heads: int, rope: RotaryPositionalEmbedding = None):
         super().__init__()
         assert d_model % num_heads == 0
         d_k = d_model // num_heads
         self.d_k = d_k
         # 这里 q k v的头数相同
-        self.q_proj = Linear(d_model, d_k*num_heads, **kwargs)
-        self.k_proj = Linear(d_model, d_k*num_heads, **kwargs)
-        self.v_proj = Linear(d_model, d_k*num_heads, **kwargs)
-        self.o_proj = Linear(d_k*num_heads, d_model, **kwargs)
+        self.q_proj = Linear(d_model, d_k*num_heads)
+        self.k_proj = Linear(d_model, d_k*num_heads)
+        self.v_proj = Linear(d_model, d_k*num_heads)
+        self.output_proj = Linear(d_k*num_heads, d_model)
         self.rope = rope
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -223,8 +224,22 @@ class MultiHeadSelfAttention(nn.Module):
         attn_output = scaled_dot_product_attention(Q, K, V, mask)
         attn_output = rearrange(
             attn_output, "... num_heads seq_len d_v -> ... seq_len (num_heads d_v)")
-        return self.o_proj(attn_output)
+        return self.output_proj(attn_output)
 
 
-if __name__ == '__main__':
-    print(torch.tril(torch.ones(5, 5)) == 1)
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, d_ff: int, rope: RotaryPositionalEmbedding):
+        super().__init__()
+        # 定义需要的模块
+        self.ln1 = RMSNorm(d_model=d_model)
+        self.attn = MultiHeadSelfAttention(
+            d_model=d_model, num_heads=num_heads, rope=rope)
+        self.ln2 = RMSNorm(d_model=d_model)
+        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # pre norm -> attn -> resid
+        x = x + self.attn(self.ln1(x))
+        # pre norm -> swiglu -> resid
+        x = x + self.ffn(self.ln2(x))
+        return x
