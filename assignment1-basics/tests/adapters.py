@@ -499,6 +499,8 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
+    from cs336_basics.modules import cross_entropy
+    return cross_entropy(inputs, targets)
     raise NotImplementedError
 
 
@@ -511,6 +513,8 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
+    from cs336_basics.modules import gradient_clipping
+    return gradient_clipping(parameters, max_l2_norm)
     raise NotImplementedError
 
 
@@ -518,6 +522,8 @@ def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
+    from cs336_basics.optimizer import AdamWOptimizer
+    return AdamWOptimizer
     raise NotImplementedError
 
 
@@ -546,6 +552,8 @@ def run_get_lr_cosine_schedule(
     Returns:
         Learning rate at the given iteration under the specified schedule.
     """
+    from cs336_basics.modules import cosine_lr_scheduler
+    return cosine_lr_scheduler(it, max_learning_rate, min_learning_rate, warmup_iters, cosine_cycle_iters)
     raise NotImplementedError
 
 

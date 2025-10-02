@@ -3,6 +3,83 @@ import torch
 import torch.nn as nn
 from einops import rearrange, einsum, reduce
 from jaxtyping import Float
+import math
+from typing import Iterable
+
+
+def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    # 使用softmax的最大值归一化，需要softmax的张量减去最大值其余的值都是0或者负数，而且最后的值不变
+    # 1. 获取到dim上对应的最大值
+    # 2. 该dim减掉对应的最大值
+    x = x-x.max(dim=dim, keepdim=True).values
+    # 3. 计算该dim上的softmax
+    exp = torch.exp(x)
+    x = exp / exp.sum(dim=dim, keepdim=True)
+    return x
+
+
+def scaled_dot_product_attention(Q: Float[torch.Tensor, "batch_size ... seq_len d_k"], K: Float[torch.Tensor, "batch_size ... seq_len d_k"], V: Float[torch.Tensor, "batch_size ... seq_len d_v"], mask: torch.Tensor):
+    d_k = Q.shape[-1]
+    attn_score = einsum(
+        Q, K, "... q_seq_len d_k,... k_seq_len d_k -> ... q_seq_len k_seq_len")
+    attn_score /= d_k ** 0.5
+    attn_score = attn_score.masked_fill(mask == False, float('-inf'))
+    attn_score = softmax(attn_score, dim=-1)
+    attn_output = einsum(
+        attn_score, V, "... q_seq_len k_seq_len , ... k_seq_len d_v -> ... q_seq_len d_v")
+    return attn_output
+
+
+def cross_entropy(inputs: Float[torch.Tensor, "... batch_size vocab_size"], targets: Float[torch.Tensor, "... batch_size"]) -> torch.Tensor:
+    """_summary_
+    这个交叉熵函数是计算的batch中一个token对应的交叉熵
+    """
+    # 这里虽然是-logsoftmax，但是没有直接使用softmax
+    # 首先 exp 和 log 应该尽可能抵消
+    target_logit: Float[torch.Tensor, "... batch_size 1"] = torch.gather(
+        inputs, dim=-1, index=targets.unsqueeze(-1))
+    # 然后这里同样是使用了把最大值减掉的技巧以确保数值稳定性
+    max_logits: Float[torch.Tensor, "... batch_size"] = reduce(
+        inputs, "... batch_size vocab_size -> ... batch_size", reduction="max").unsqueeze(-1)
+    scaled_inputs = inputs - max_logits
+    exp_sum = torch.exp(scaled_inputs).sum(dim=-1, keepdim=True)
+    batch_cross_entropy = max_logits + torch.log(exp_sum) - target_logit
+    return reduce(batch_cross_entropy.squeeze(-1), "... batch_size -> ...", reduction="mean")
+
+
+def batch_perplexity(entropy_loss: Float[torch.Tensor, "... batch_size seq_len"]) -> torch.Tensor:
+    """
+    计算每个序列的困惑度（每个序列平均每个词面临多少个等概率的选项）
+    """
+    mean_cross_entropy = reduce(
+        entropy_loss, "... batch_size seq_len -> ... batch_size", reduction="mean")
+    return torch.exp(mean_cross_entropy)
+
+
+def cosine_lr_scheduler(it: int, max_learning_rate: float, min_learning_rate: float, warmup_iters: int, consine_cycle_iters: int):
+    if it < warmup_iters:
+        return max_learning_rate * it / warmup_iters
+    elif it >= warmup_iters and it <= consine_cycle_iters:
+        return min_learning_rate + (max_learning_rate - min_learning_rate)*(1+math.cos(math.pi * (it - warmup_iters)/(consine_cycle_iters - warmup_iters))) / 2
+    return min_learning_rate
+
+
+def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float, eps: float = 1e-6):
+    # 这里开始实现错了，针对每个梯度单独计算l2范数并缩放，应该考虑所有的梯度，计算l2范数并缩放
+    l2_norm = 0.0
+    for p in parameters:
+        if p.grad is None:
+            continue
+        l2_norm += p.grad.data.pow(2).sum().item()
+    l2_norm = math.sqrt(l2_norm)
+    if l2_norm <= max_l2_norm:
+        return
+    clip_coeff = max_l2_norm / (l2_norm+eps)
+    # 确保缩放因子不大于 1
+    for p in parameters:
+        if p.grad is None:
+            continue
+        p.grad.data.mul_(clip_coeff)
 
 
 class Linear(nn.Module):
@@ -169,29 +246,6 @@ class RotaryPositionalEmbedding(nn.Module):
         return x
 
 
-def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
-    # 使用softmax的最大值归一化，需要softmax的张量减去最大值其余的值都是0或者负数，而且最后的值不变
-    # 1. 获取到dim上对应的最大值
-    # 2. 该dim减掉对应的最大值
-    x = x-x.max(dim=dim, keepdim=True).values
-    # 3. 计算该dim上的softmax
-    exp = torch.exp(x)
-    x = exp / exp.sum(dim=dim, keepdim=True)
-    return x
-
-
-def scaled_dot_product_attention(Q: Float[torch.Tensor, "batch_size ... seq_len d_k"], K: Float[torch.Tensor, "batch_size ... seq_len d_k"], V: Float[torch.Tensor, "batch_size ... seq_len d_v"], mask: torch.Tensor):
-    d_k = Q.shape[-1]
-    attn_score = einsum(
-        Q, K, "... q_seq_len d_k,... k_seq_len d_k -> ... q_seq_len k_seq_len")
-    attn_score /= d_k ** 0.5
-    attn_score = attn_score.masked_fill(mask == False, float('-inf'))
-    attn_score = softmax(attn_score, dim=-1)
-    attn_output = einsum(
-        attn_score, V, "... q_seq_len k_seq_len , ... k_seq_len d_v -> ... q_seq_len d_v")
-    return attn_output
-
-
 class MultiHeadSelfAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int, rope: RotaryPositionalEmbedding = None):
         super().__init__()
@@ -243,3 +297,12 @@ class TransformerBlock(nn.Module):
         # pre norm -> swiglu -> resid
         x = x + self.ffn(self.ln2(x))
         return x
+
+
+if __name__ == '__main__':
+    a = torch.arange(0, 16).view(2, 8)
+    b = torch.tensor([1, 2]).view(2)
+    print(a)
+    b = b.unsqueeze(-1)
+    print(b)
+    print(torch.gather(a, -1, b))
