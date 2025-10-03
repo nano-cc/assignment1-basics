@@ -4,7 +4,9 @@ import torch.nn as nn
 from einops import rearrange, einsum, reduce
 from jaxtyping import Float
 import math
-from typing import Iterable
+from typing import Iterable, Union
+import os
+import typing
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
@@ -80,6 +82,69 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: flo
         if p.grad is None:
             continue
         p.grad.data.mul_(clip_coeff)
+
+
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: Union[str, os.PathLike, typing.BinaryIO]
+) -> None:
+    """
+    保存模型的、优化器的状态字典以及当前的迭代次数。
+
+    Args:
+        model: PyTorch 模型 (nn.Module)。
+        optimizer: PyTorch 优化器 (optim.Optimizer)。
+        iteration: 当前的训练迭代次数 (int)。
+        out: 输出路径 (str, PathLike) 或文件对象 (BinaryIO)。
+    """
+    # 1. 创建一个字典，包含所有需要保存的状态
+    checkpoint_dict = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'iteration': iteration,
+    }
+
+    # 2. 使用 torch.save 将字典保存到文件
+    # 注意：out 可以是路径字符串，也可以是文件对象
+    torch.save(checkpoint_dict, out)
+
+
+def load_checkpoint(
+    src: Union[str, os.PathLike, typing.BinaryIO],
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer
+) -> int:
+    """
+    从源加载检查点，恢复模型和优化器的状态，并返回保存的迭代次数。
+
+    Args:
+        src: 检查点源路径 (str, PathLike) 或文件对象 (BinaryIO)。
+        model: PyTorch 模型 (nn.Module)，将被原地修改。
+        optimizer: PyTorch 优化器 (optim.Optimizer)，将被原地修改。
+
+    Returns:
+        保存的迭代次数 (int)。
+    """
+
+    # 1. 使用 torch.load 加载整个检查点字典
+    # 注意：建议使用 map_location 参数来确保模型加载到正确的设备
+    # 例如：map_location='cuda:0' 或 map_location='cpu'
+    checkpoint_dict = torch.load(src)
+
+    # 2. 恢复模型状态
+    # strict=True (默认) 确保加载的键与模型中的键完全匹配
+    model.load_state_dict(checkpoint_dict['model_state_dict'])
+
+    # 3. 恢复优化器状态
+    # 优化器状态必须在模型参数加载后才能恢复
+    optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
+
+    # 4. 返回迭代次数
+    iteration = checkpoint_dict['iteration']
+
+    return iteration
 
 
 class Linear(nn.Module):
