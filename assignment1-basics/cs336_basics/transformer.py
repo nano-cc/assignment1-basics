@@ -5,7 +5,7 @@ from collections import defaultdict
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size: int, context_length: int, d_model: int, num_layers: int, num_heads: int, d_ff: int, rope_theta: float = 10000.0):
+    def __init__(self, vocab_size: int, context_length: int, d_model: int, num_layers: int, num_heads: int, d_ff: int, rope_theta: float = 10000.0,**kwargs):
         super().__init__()
         # 定义需要的模块
         self.token_embeddings = Embedding(
@@ -75,8 +75,5 @@ def count_module_parameters(model: nn.Module) -> dict:
 
     return formatted_results
 
-
 if __name__ == '__main__':
     pass
-    model = Transformer(50257, 1024, 1600, 48, 25, 6400).to('meta')
-    print(count_module_parameters(model))

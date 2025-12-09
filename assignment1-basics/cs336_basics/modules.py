@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from einops import rearrange, einsum, reduce
-from jaxtyping import Float
+from jaxtyping import Float, Int
 import math
 from typing import Iterable, Union
 import os
@@ -32,7 +32,7 @@ def scaled_dot_product_attention(Q: Float[torch.Tensor, "batch_size ... seq_len 
     return attn_output
 
 
-def cross_entropy(inputs: Float[torch.Tensor, "... batch_size vocab_size"], targets: Float[torch.Tensor, "... batch_size"]) -> torch.Tensor:
+def cross_entropy(inputs: Float[torch.Tensor, "... batch_size vocab_size"], targets: Int[torch.Tensor, "... batch_size"]) -> torch.Tensor:
     """_summary_
     这个交叉熵函数是计算的batch中一个token对应的交叉熵
     """
@@ -58,11 +58,11 @@ def batch_perplexity(entropy_loss: Float[torch.Tensor, "... batch_size seq_len"]
     return torch.exp(mean_cross_entropy)
 
 
-def cosine_lr_scheduler(it: int, max_learning_rate: float, min_learning_rate: float, warmup_iters: int, consine_cycle_iters: int):
+def cosine_lr_scheduler(it: int, max_learning_rate: float, min_learning_rate: float, warmup_iters: int, cosine_cycle_iters: int):
     if it < warmup_iters:
         return max_learning_rate * it / warmup_iters
-    elif it >= warmup_iters and it <= consine_cycle_iters:
-        return min_learning_rate + (max_learning_rate - min_learning_rate)*(1+math.cos(math.pi * (it - warmup_iters)/(consine_cycle_iters - warmup_iters))) / 2
+    elif warmup_iters <= it <= cosine_cycle_iters:
+        return min_learning_rate + (max_learning_rate - min_learning_rate)*(1 + math.cos(math.pi * (it - warmup_iters) / (cosine_cycle_iters - warmup_iters))) / 2
     return min_learning_rate
 
 
@@ -114,7 +114,7 @@ def save_checkpoint(
 def load_checkpoint(
     src: Union[str, os.PathLike, typing.BinaryIO],
     model: nn.Module,
-    optimizer: torch.optim.Optimizer
+    optimizer: typing.Optional[torch.optim.Optimizer]
 ) -> int:
     """
     从源加载检查点，恢复模型和优化器的状态，并返回保存的迭代次数。
@@ -139,7 +139,8 @@ def load_checkpoint(
 
     # 3. 恢复优化器状态
     # 优化器状态必须在模型参数加载后才能恢复
-    optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
+    if optimizer is not None:
+        optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
 
     # 4. 返回迭代次数
     iteration = checkpoint_dict['iteration']
@@ -175,7 +176,7 @@ class Linear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply the linear transformation to the input."""
-        return einsum(self.weight, x, "out in,... seq_len in -> ... seq_len out")
+        return einsum(self.weight, x, "out in_dim,... seq_len in_dim -> ... seq_len out")
 
 
 class Embedding(nn.Module):
@@ -306,6 +307,7 @@ class RotaryPositionalEmbedding(nn.Module):
         half_dim = d_k // 2
         x = rearrange(x, "... (half_d_k two) -> ... half_d_k two",
                       two=2).unsqueeze(-1)
+        print(token_positions)
         x = self.pos_cis[token_positions, :half_dim] @ x
         x = rearrange(x.squeeze(-1), "... half_d_k two -> ... (half_d_k two)")
         return x
