@@ -46,7 +46,8 @@ def cross_entropy(inputs: Float[torch.Tensor, "... batch_size vocab_size"], targ
     scaled_inputs = inputs - max_logits
     exp_sum = torch.exp(scaled_inputs).sum(dim=-1, keepdim=True)
     batch_cross_entropy = max_logits + torch.log(exp_sum) - target_logit
-    return reduce(batch_cross_entropy.squeeze(-1), "... batch_size -> ...", reduction="mean")
+    # return reduce(batch_cross_entropy.squeeze(-1), "... batch_size -> ...", reduction="mean")
+    return batch_cross_entropy.squeeze(-1)
 
 
 def batch_perplexity(entropy_loss: Float[torch.Tensor, "... batch_size seq_len"]) -> torch.Tensor:
@@ -307,7 +308,6 @@ class RotaryPositionalEmbedding(nn.Module):
         half_dim = d_k // 2
         x = rearrange(x, "... (half_d_k two) -> ... half_d_k two",
                       two=2).unsqueeze(-1)
-        print(token_positions)
         x = self.pos_cis[token_positions, :half_dim] @ x
         x = rearrange(x.squeeze(-1), "... half_d_k two -> ... (half_d_k two)")
         return x

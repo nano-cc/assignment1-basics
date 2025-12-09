@@ -1,18 +1,10 @@
-import json
-import argparse
 import os
 import random
+import re
 
-import wandb
-import torch
-import yaml
 import numpy as np
-from cs336_basics.dataloader import get_batch
-from cs336_basics.modules import cross_entropy, gradient_clipping, cosine_lr_scheduler, save_checkpoint, load_checkpoint
-from cs336_basics.optimizer import AdamWOptimizer
-from cs336_basics.tokenizer import BPETokenizer
-from cs336_basics.transformer import Transformer, count_module_parameters
-from tqdm import tqdm
+import torch
+
 
 def get_device():
     # 返回当前可用的计算设备
@@ -54,7 +46,6 @@ def get_grad_norms(tgt_model):
     # 计算模型所有梯度的 L2 范数
     # 用于监控梯度是否爆炸或消失
     total_norm = 0.0
-    import torch
     for p in tgt_model.parameters():
         if p.grad is not None:
             grad_norm = p.grad.data.norm(2)  # 单个梯度张量的 L2 范数
@@ -68,3 +59,25 @@ def set_manual_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+
+def find_latest_checkpoint(ckpt_dir: str) -> str | None:
+    """
+    在 ckpt_dir 中搜索形如 checkpoint_<step>.ckpt 的文件，
+    返回 step 最大的检查点文件名。
+    如果没有 checkpoint 文件，返回 None。
+    """
+
+    ckpt_pattern = re.compile(r"checkpoint_(\d+)\.ckpt$")
+    latest_step = -1
+    latest_ckpt = None
+
+    for fname in os.listdir(ckpt_dir):
+        match = ckpt_pattern.match(fname)
+        if match:
+            step = int(match.group(1))
+            if step > latest_step:
+                latest_step = step
+                latest_ckpt = fname
+
+    return latest_ckpt

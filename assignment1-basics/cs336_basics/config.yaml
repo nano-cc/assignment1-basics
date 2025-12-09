@@ -13,7 +13,7 @@ eps: 1.0e-8
 weight_decay: 0.01
 
 # 学习率调度器
-max_lr : 6.0e-4
+max_lr : 1.0e-4
 min_lr : 6.0e-5
 warmup_ratio : 0.01
 cosine_cycle_ratio: 1
@@ -24,18 +24,28 @@ vocab_file_path: /home/liuxiaoming/clx/data/trained/tokenizer/vocab_size_10000/v
 merges_file_path: /home/liuxiaoming/clx/data/trained/tokenizer/vocab_size_10000/merges_tinystories.json
 
 # 训练
+train_ratio: 0.1
+batch_size: 64
+num_epoch: 3
+
+# 日志
+log_iter: 100
+eval_iter: 500
 enable_wandb: yes
 wandb_project_name: cs336
-wandb_run_name: TinyStories验证集训练过拟合测试
-enable_eval: no
-train_path: /home/liuxiaoming/clx/data/tokenized_output/TinyStoriesV2-GPT4-valid.bin
+wandb_run_name: TinyStories训练-学习率超参数调试
+
+# eval
+enable_eval: yes
+eval_ratio: 0.1
+train_path: /home/liuxiaoming/clx/data/tokenized_output/TinyStoriesV2-GPT4-train.bin
 eval_path: /home/liuxiaoming/clx/data/tokenized_output/TinyStoriesV2-GPT4-valid.bin
-batch_size: 16
-num_epoch: 10
-log_iter: 1000
+prompt: Once,
+
+# 保存
 seed: 42
 save_dir: /data/clx/pycharm_projs/assignment1-basics/assignment1-basics/save
-save_iter: 6000 # 每隔多少步保存一次
+save_iter: 500 # 每隔多少步保存一次
 
 # 梯度裁剪
 max_l2_norm: 1.0

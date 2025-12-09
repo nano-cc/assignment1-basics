@@ -4,7 +4,7 @@ import json
 import torch
 import torch.nn.functional as F
 from typing import Optional
-from train import get_device,set_manual_seed,find_latest_checkpoint
+from utils import get_device,set_manual_seed,find_latest_checkpoint
 from transformer import Transformer,count_module_parameters
 from modules import load_checkpoint
 from tokenizer import BPETokenizer
@@ -18,7 +18,6 @@ def generate_text(
         temperature: float = 1.0,
         top_p: float = 1.0,
         eos_token: Optional[str] = "<endoftext>",
-        device: Optional[str] = None,
 ) -> str:
     """
     使用给定的语言模型从 prompt 生成文本。
@@ -36,11 +35,10 @@ def generate_text(
     Returns:
         生成的完整文本（包含 prompt）
     """
-    if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model.evaluate()
-    model.to(device)
+    model.eval()
+
+    device = next(model.parameters()).device
 
     # 1. 把 prompt 编成 token 序列
     input_ids = tokenizer.encode(prompt)
@@ -119,10 +117,7 @@ def generate_text(
     output_tokens = input_ids.tolist()
     return tokenizer.decode(output_tokens)
 
-
-if __name__ == '__main__':
-    # 1. 加载配置以及上次训练保存的各种参数
-    config = yaml.safe_load(open('config.yaml'))
+def load_ckpt_and_generate_text(save_dir:str, ckpt_name:str):
     # 2. 配置设备
     device = get_device()
     # 3. 设置随机种子
@@ -130,11 +125,17 @@ if __name__ == '__main__':
     # 4. 加载模型
     model = Transformer(**config)
     model.to(device)
-    ckpt_path = os.path.join(config['save_dir'], find_latest_checkpoint(config['save_dir']))
+    ckpt_path = os.path.join(save_dir, ckpt_name)
     print("加载检查点{}".format(ckpt_path))
     config['cur_step'] = load_checkpoint(ckpt_path, model, None)
     print(config['cur_step'])
     print(count_module_parameters(model))
     # 5. 加载分词器
     tokenizer = BPETokenizer.from_files(config['vocab_file_path'], config['merges_file_path'])
-    print(generate_text(model, tokenizer,max_new_tokens=100, prompt="Once",))
+    print(generate_text(model, tokenizer, max_new_tokens=100, prompt="Once", ))
+
+
+if __name__ == '__main__':
+    # 1. 加载配置以及上次训练保存的各种参数
+    config = yaml.safe_load(open('config.yaml'))
+    load_ckpt_and_generate_text(config['save_dir'], find_latest_checkpoint(config['save_dir']))

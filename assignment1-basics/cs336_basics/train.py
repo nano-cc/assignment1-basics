@@ -2,16 +2,20 @@ import json
 import argparse
 import os
 import random
+from tabnanny import process_tokens
 
 import wandb
 import torch
 import yaml
 import numpy as np
 from cs336_basics.dataloader import get_batch
-from cs336_basics.modules import cross_entropy, gradient_clipping, cosine_lr_scheduler, save_checkpoint, load_checkpoint
+from cs336_basics.generate_text import generate_text
+from cs336_basics.modules import cross_entropy, gradient_clipping, cosine_lr_scheduler, save_checkpoint, \
+    load_checkpoint, batch_perplexity
 from cs336_basics.optimizer import AdamWOptimizer
 from cs336_basics.tokenizer import BPETokenizer
-from cs336_basics.utils import init_wandb, get_device, set_manual_seed
+from cs336_basics.utils import init_wandb, get_device, set_manual_seed, find_latest_checkpoint, get_weight_norms, \
+    get_grad_norms
 from cs336_basics.transformer import Transformer, count_module_parameters
 from tqdm import tqdm
 
@@ -19,37 +23,12 @@ def cal_load_step():
     """
     计算每步迭代加载多少数据
     """
-    # 这里设置的逻辑是1/10重叠
-    return (config['batch_size']-1)*int(config['context_length']/10)+config['context_length']
+    return config['context_length'] * config['batch_size'] - config['context_length']
 
 
 
 def get_ckpt_name(cur_step):
     return f"checkpoint_{cur_step}.ckpt"
-import re
-
-def find_latest_checkpoint(ckpt_dir: str) -> str | None:
-    """
-    在 ckpt_dir 中搜索形如 checkpoint_<step>.ckpt 的文件，
-    返回 step 最大的检查点文件名。
-    如果没有 checkpoint 文件，返回 None。
-    """
-
-    ckpt_pattern = re.compile(r"checkpoint_(\d+)\.ckpt$")
-    latest_step = -1
-    latest_ckpt = None
-
-    for fname in os.listdir(ckpt_dir):
-        match = ckpt_pattern.match(fname)
-        if match:
-            step = int(match.group(1))
-            if step > latest_step:
-                latest_step = step
-                latest_ckpt = fname
-
-    return latest_ckpt
-
-
 
 def get_file_length_in_elements(filename, dtype):
     """
@@ -68,29 +47,34 @@ def load_batch(split:str='train', offset:int=0, tar_device:str= 'cuda:0'):
     else:
         path = config['eval_path']
     # 这里有个问题，每次读的shape大小应该为多少
-    data = np.memmap(path, dtype=np.uint16, mode='r',offset=offset * np.dtype(np.uint16).itemsize,shape=cal_load_step())
+    data = np.memmap(path, dtype=np.uint16, mode='r', offset=offset * np.dtype(np.uint16).itemsize,
+                     shape=cal_load_step())
     if data.shape[0] < cal_load_step():
         return None
     return get_batch(data, config['batch_size'], config['context_length'], tar_device)
 
+
 def evaluate():
-    total_loss = 0.0
+    print("开始eval")
+    total_perplexity = 0.0
     cur_step = 1
     total_len = get_file_length_in_elements(config['eval_path'], np.uint16)
+    load_step = cal_load_step()
     with torch.no_grad():
-        load_step = cal_load_step()
         offset = 0
-        eval_data  = load_batch('eval',offset,device)
-        while offset + load_step < total_len and eval_data is not None:
-            x = eval_data[0].to(dtype=torch.long)
-            label = eval_data[1].to(dtype=torch.long)
+        while offset + load_step + 1 < config['eval_ratio'] * total_len:
+            print(f"eval进度：{(offset+load_step)/(config['eval_ratio']*total_len)*100}%")
+            eval_data = load_batch("eval",offset,device)
+            x = eval_data[0].to(dtype=torch.long,device=device)
+            label = eval_data[1].to(dtype=torch.long,device=device)
             output = model(x)
-            loss = cross_entropy(output, label).mean()
-            total_loss += loss
+            loss = cross_entropy(output, label)
+            perplexity = batch_perplexity(loss)
+            total_perplexity += perplexity.mean().item()
             offset += load_step
-            eval_data = load_batch('eval',offset,device)
             cur_step += 1
-    return total_loss / cur_step
+    print(f"eval进度：100%")
+    return total_perplexity / cur_step
 
 def main():
     """
@@ -98,7 +82,7 @@ def main():
     """
     # 1. 首先计算一个epoch需要多少步
     load_step = cal_load_step()
-    total_len = get_file_length_in_elements(config['train_path'], np.uint16)
+    total_len = get_file_length_in_elements(config['train_path'], np.uint16) * config['train_ratio']
     one_epoch_steps = total_len // load_step
     total_num_steps = one_epoch_steps * config['num_epoch']
     print(f"load_step:{load_step}, total_len:{total_len}, num_steps:{total_num_steps}")
@@ -126,8 +110,9 @@ def main():
             label = data[1].to(dtype=torch.long)
             # 3. 前向传播
             output = model(x)
-            loss = cross_entropy(output, label).mean()
+            loss = cross_entropy(output, label)
             # 4. 反向传播 梯度裁剪
+            loss = loss.mean()
             loss.backward()
             gradient_clipping(model.parameters(), max_l2_norm=config['max_l2_norm'])
             # 5. 优化器优化
@@ -140,16 +125,19 @@ def main():
                 'loss':loss.item(),
                 'total_step':total_num_steps,
             })
-            if cur_step != 0 and cur_step % config['log_iter'] == 0:
+            if cur_step != 0 and cur_step % config['log_iter'] == 0 and config['enable_wandb']:
+                weight_norms = get_weight_norms(model)
+                grad_norms = get_grad_norms(model)
                 log_data = {
                     "train/loss": loss,
                     "train/lr": lr,
-                    "train/step": cur_step,
+                    "train/weight_norms":weight_norms,
+                    "train/grad_norms":grad_norms,
+                    "step":cur_step,
                 }
-                if config['enable_eval']:
+                if config['enable_eval'] and cur_step % config['eval_iter'] == 0:
                     eval_loss = evaluate()
-                    log_data["eval/loss"] = eval_loss
-                    log_data["eval/step"] = cur_step
+                    log_data["eval/perplexity"] = eval_loss
                 # 日志记录
                 wandb.log(log_data)
             if cur_step!=0 and cur_step % config['save_iter'] == 0:
@@ -165,6 +153,7 @@ def main():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="训练脚本")
     parser.add_argument("--resume", action="store_true", help="是否继续上次的结果训练")
+    parser.add_argument("--config",type=str,default='config.yaml')
     args,_ = parser.parse_known_args()
     # 1. 加载配置以及上次训练保存的各种参数
     config = yaml.safe_load(open('config.yaml'))
